@@ -31,9 +31,9 @@ CAMERA["distance_from_virtual_screen"] = (
     CAMERA["camera_virtual_screen_width"] / (2.0 * np.tan(CAMERA["FOV"] / 2.0))
 )
 
-RAYS_NUMBER = 500
+RAYS_NUMBER = 100
 MAX_STEPS = 5_000
-LUT_DR = 2.0
+LUT_DR = 1.0
 STARTUP_PRECOMPUTE_MARGIN = 20.0
 IDLE_PREFETCH_MARGIN = 2.0
 
