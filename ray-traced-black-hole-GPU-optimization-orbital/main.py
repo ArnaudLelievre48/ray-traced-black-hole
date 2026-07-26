@@ -39,6 +39,7 @@ IDLE_PREFETCH_MARGIN = 2.0
 
 ANGLE_SPEED = np.deg2rad(90.0)  # rad/s
 MOVE_SPEED = 15.0                # unités de coordonnée / s
+MOUSE_SENSITIVITY = 0.0005        # rad/pixel
 
 
 def camera_position(camera):
@@ -162,6 +163,33 @@ def handle_continuous_input(dt):
     return orientation_changed, position_changed, should_quit
 
 
+def capture_mouse():
+    """Capture la souris dans la fenêtre pour pouvoir regarder autour."""
+    pygame.event.set_grab(True)
+    pygame.mouse.set_visible(False)
+    pygame.mouse.get_rel()  # flush, évite un saut initial
+
+
+def handle_mouse_look():
+    """Tourne la caméra avec le mouvement relatif de la souris."""
+    dx, dy = pygame.mouse.get_rel()
+
+    if dx == 0 and dy == 0:
+        return False
+
+    CAMERA["angle_horizontal"] += dx * MOUSE_SENSITIVITY
+
+    # dy positif = souris vers le bas. Le signe ci-dessous donne un feeling FPS :
+    # souris vers le haut -> regarde vers le haut.
+    CAMERA["angle_vertical"] = np.clip(
+        CAMERA["angle_vertical"] + dy * MOUSE_SENSITIVITY,
+        1e-3,
+        np.pi - 1e-3,
+    )
+
+    return True
+
+
 def main():
     skybox = func.load_skybox("source/skybox.png")
 
@@ -185,6 +213,7 @@ def main():
         title="Ray-traced black hole",
     )
     display.update_image(frame)
+    capture_mouse()
 
     running = True
     last_time = time.perf_counter()
@@ -202,10 +231,11 @@ def main():
                 running = False
 
         orientation_changed, position_changed, should_quit = handle_continuous_input(dt)
+        mouse_changed = handle_mouse_look()
         if should_quit:
             running = False
 
-        if orientation_changed:
+        if orientation_changed or mouse_changed:
             image_dirty = True
             had_input = True
         if position_changed:
