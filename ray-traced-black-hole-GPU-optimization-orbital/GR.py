@@ -105,6 +105,46 @@ def rk4_step(X, h, M):
     return X + (h / 6.0) * (k1 + 2*k2 + 2*k3 + k4)
 
 
+def direction_step_factor(beta0):
+    """Facteur directionnel pré-calculable pour h adaptatif rapide.
+
+    beta=0 vise le trou noir : on réduit le pas, mais pas jusqu'au minimum.
+    Hors du cône beta_safe, le facteur vaut 1.
+    """
+    beta_safe = 0.20  # ~11.5 degrés
+    factor = cp.clip(beta0 / beta_safe, 0.0, 1.0)
+    return 0.5 + 0.5 * factor
+
+
+def adaptive_step_from_radius_and_beta(X, beta0, M, h_max):
+    """Version lisible : h absolu entre 0.05 et h_max.
+
+    Heuristique volontairement cheap : linéaire en r, direction prévisible en beta,
+    pas de puissances. Le but est que le calcul de h ne devienne pas le bottleneck.
+    """
+    h = cp.empty((X.shape[0], 1), dtype=X.dtype)
+    update_adaptive_step_inplace(h, X, direction_step_factor(beta0), M, h_max)
+    return h
+
+
+def update_adaptive_step_inplace(h, X, direction_factor, M, h_max):
+    """Update rapide de h, in-place.
+
+    h varie entre 0.05 et h_max typiquement 0.1--0.5.
+    direction_factor est pré-calculé une seule fois depuis beta0.
+    """
+    r = X[:, 1]
+
+    h_min = 0.05
+    r_near = 2.05 * M
+    r_far = 12.0 * M
+
+    radius_factor = cp.clip((r - r_near) / (r_far - r_near), 0.0, 1.0)
+    factor = cp.minimum(radius_factor, direction_factor)
+
+    h[:, 0] = h_min + (h_max - h_min) * factor
+
+
 # beta = 0 => vers le trou noir
 # beta = pi => à l'opposé du trou noir
 def orbital_geodesic(r, M, RAYS_NUMBER=1000, MAX_STEPS=10_000, r_escape=None, h_step=1):
@@ -126,9 +166,10 @@ def orbital_geodesic(r, M, RAYS_NUMBER=1000, MAX_STEPS=10_000, r_escape=None, h_
         ubeta,
     ], axis=1).astype(cp.float64)
 
-    # Matrice-colonne : un pas par rayon, broadcastable avec X.shape == (N, 6).
-    # Plus tard tu pourras remplacer chaque h[ray_id, 0] indépendamment.
-    h = h_step * (1.0 - 0.95 * cp.sin(0.5 * beta))[:, None]
+    # Ancienne heuristique direction seule, gardée pour référence :
+    # h = h_step * (1.0 - 0.95 * cp.sin(0.5 * beta))[:, None]
+    # Problème : elle ne regardait pas la distance courante au trou noir.
+    h = adaptive_step_from_radius_and_beta(X, beta, M, h_step)
 
     if r_escape is None:
         r_escape = r
@@ -139,6 +180,10 @@ def orbital_geodesic(r, M, RAYS_NUMBER=1000, MAX_STEPS=10_000, r_escape=None, h_
     for step in range(MAX_STEPS):
         if not bool(active.any().get()):
             break
+
+        # h dépend du r courant : ralentit quand le rayon approche du trou noir.
+        if step % 300 == 0:
+            h = adaptive_step_from_radius_and_beta(X, beta, M, h_step)
 
         # On n'intègre que les rayons actifs. Sinon les rayons déjà échappés
         # continuent vers r énorme pendant MAX_STEPS et peuvent overflow.
@@ -165,7 +210,16 @@ def orbital_geodesic(r, M, RAYS_NUMBER=1000, MAX_STEPS=10_000, r_escape=None, h_
 
 
 
-def orbital_geodesic_fast(r, M, RAYS_NUMBER=1000, MAX_STEPS=10_000, r_escape=None, h_step=0.5, check_interval=25):
+def orbital_geodesic_fast(
+    r,
+    M,
+    RAYS_NUMBER=1000,
+    MAX_STEPS=20_000,
+    r_escape=None,
+    h_step=2,
+    check_interval=25,
+    h_update_interval=16,
+):
     """Version performance de orbital_geodesic.
 
     Même état :
@@ -176,7 +230,8 @@ def orbital_geodesic_fast(r, M, RAYS_NUMBER=1000, MAX_STEPS=10_000, r_escape=Non
         - préalloue k1,k2,k3,k4,tmp ;
         - calcule le RHS en place ;
         - évite X[active] = rk4_step(...) qui réalloue/compacte à chaque step ;
-        - sync CPU active.any().get() seulement tous les check_interval steps.
+        - sync CPU active.any().get() seulement tous les check_interval steps ;
+        - update du pas adaptatif seulement tous les h_update_interval steps.
 
     C'est moins lisible, donc on garde les fonctions classiques au-dessus comme référence.
     """
@@ -199,8 +254,13 @@ def orbital_geodesic_fast(r, M, RAYS_NUMBER=1000, MAX_STEPS=10_000, r_escape=Non
     X[:, 5] = ubeta0
 
     # h.shape == (N,1), pour multiplier correctement les 6 composantes.
-    # Petit pas près de beta=pi, là où sin(beta/2)=1 ; grand pas près de beta=0.
-    h = h_step * (1.0 - 0.9 * cp.sin(0.5 * beta0))[:, None]
+    # Ancienne heuristique direction seule, gardée pour référence :
+    # h = h_step * (1.0 - 0.9 * cp.sin(0.5 * beta0))[:, None]
+    # Problème : beta=0 vers le trou noir avait un gros pas, et la distance
+    # courante au trou noir n'était pas prise en compte.
+    h = cp.empty((RAYS_NUMBER, 1), dtype=cp.float64)
+    direction_factor = direction_step_factor(beta0)
+    update_adaptive_step_inplace(h, X, direction_factor, M, h_step)
 
     active = cp.ones(RAYS_NUMBER, dtype=cp.bool_)
     capture_radius = 2.05 * M
@@ -243,6 +303,12 @@ def orbital_geodesic_fast(r, M, RAYS_NUMBER=1000, MAX_STEPS=10_000, r_escape=Non
     for step in range(MAX_STEPS):
         if step % check_interval == 0 and not bool(active.any().get()):
             break
+
+        # Calculer h à chaque step coûtait plus cher que prévu sur GPU.
+        # On l'actualise seulement de temps en temps : r évolue continûment,
+        # donc h n'a pas besoin d'être recalculé à chaque sous-pas RK4.
+        if step % h_update_interval == 0:
+            update_adaptive_step_inplace(h, X, direction_factor, M, h_step)
 
         rhs_inplace(X, k1)
 

@@ -4,9 +4,9 @@ import cupy as cp
 import numpy as np
 import pygame
 
-import GR
 import func
 from display import OpenGLImageDisplay
+from lut_cache import OrbitalLUTCache
 
 
 BLACKHOLE = {
@@ -19,7 +19,7 @@ BLACKHOLE = {
 CAMERA = {
     "FOV": np.deg2rad(75),
     "x": 0.0,
-    "y": -50.0,
+    "y": -75.0,
     "z": 0.0,
     "angle_vertical": np.pi / 2,
     "angle_horizontal": np.pi / 2,
@@ -27,16 +27,18 @@ CAMERA = {
     "height": 720,
     "camera_virtual_screen_width": 1.0,
 }
-
 CAMERA["distance_from_virtual_screen"] = (
     CAMERA["camera_virtual_screen_width"] / (2.0 * np.tan(CAMERA["FOV"] / 2.0))
 )
 
 RAYS_NUMBER = 500
 MAX_STEPS = 5_000
+LUT_DR = 2.0
+STARTUP_PRECOMPUTE_MARGIN = 20.0
+IDLE_PREFETCH_MARGIN = 2.0
 
-ANGLE_STEP = np.deg2rad(2.0)
-MOVE_STEP = 2.0
+ANGLE_SPEED = np.deg2rad(90.0)  # rad/s
+MOVE_SPEED = 15.0                # unités de coordonnée / s
 
 
 def camera_position(camera):
@@ -75,25 +77,6 @@ def camera_basis(camera):
     return forward, right, up
 
 
-def compute_lut():
-    """Calcule la LUT GR pour la distance caméra-trou noir actuelle."""
-    r = camera_radius(CAMERA, BLACKHOLE)
-    beta_grid = cp.linspace(0.0, cp.pi, RAYS_NUMBER, dtype=cp.float64)
-
-    t0 = time.perf_counter()
-    print(f"computing deviation LUT at r={r:.3f}...")
-    final_states = GR.orbital_geodesic_fast(
-        r,
-        BLACKHOLE["MASS"],
-        RAYS_NUMBER=RAYS_NUMBER,
-        MAX_STEPS=MAX_STEPS,
-    )
-    cp.cuda.Stream.null.synchronize()
-    print(f"LUT done in {time.perf_counter() - t0:.3f}s")
-
-    return beta_grid, final_states
-
-
 def render_frame(skybox, beta_grid, final_states):
     """Rend l'image courante depuis CAMERA, sans recalculer la géodésique."""
     t0 = time.perf_counter()
@@ -116,58 +99,64 @@ def move_camera(delta):
     CAMERA["z"] += delta[2]
 
 
-def handle_keydown(event):
-    """Retourne (orientation_changed, position_changed, should_quit)."""
+def handle_continuous_input(dt):
+    """Lit l'état clavier courant.
+
+    Contrairement aux KEYDOWN ponctuels, pygame.key.get_pressed() permet :
+        - maintenir une touche enfoncée ;
+        - combiner plusieurs touches, ex: z+d, z+space, left+up.
+
+    Retourne (orientation_changed, position_changed, should_quit).
+    """
+    keys = pygame.key.get_pressed()
+
     orientation_changed = False
     position_changed = False
-    should_quit = False
+    should_quit = keys[pygame.K_ESCAPE]
 
+    # Rotation continue.
+    d_angle_h = 0.0
+    d_angle_v = 0.0
+
+    if keys[pygame.K_LEFT] or keys[pygame.K_j]:
+        d_angle_h -= ANGLE_SPEED * dt
+    if keys[pygame.K_RIGHT] or keys[pygame.K_l]:
+        d_angle_h += ANGLE_SPEED * dt
+    if keys[pygame.K_UP] or keys[pygame.K_i]:
+        d_angle_v -= ANGLE_SPEED * dt
+    if keys[pygame.K_DOWN] or keys[pygame.K_k]:
+        d_angle_v += ANGLE_SPEED * dt
+
+    if d_angle_h != 0.0 or d_angle_v != 0.0:
+        CAMERA["angle_horizontal"] += d_angle_h
+        CAMERA["angle_vertical"] = np.clip(
+            CAMERA["angle_vertical"] + d_angle_v,
+            1e-3,
+            np.pi - 1e-3,
+        )
+        orientation_changed = True
+
+    # Déplacement continu AZERTY : zqsd + espace/shift.
     forward, right, up = camera_basis(CAMERA)
+    move = np.zeros(3, dtype=np.float64)
 
-    if event.key == pygame.K_ESCAPE:
-        should_quit = True
+    if keys[pygame.K_z]:
+        move += forward
+    if keys[pygame.K_s]:
+        move -= forward
+    if keys[pygame.K_d]:
+        move += right
+    if keys[pygame.K_q]:
+        move -= right
+    if keys[pygame.K_SPACE]:
+        move += up
+    if keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT]:
+        move -= up
 
-    # Rotation clavier pour l'instant.
-    elif event.key in (pygame.K_LEFT, pygame.K_j):
-        CAMERA["angle_horizontal"] -= ANGLE_STEP
-        orientation_changed = True
-    elif event.key in (pygame.K_RIGHT, pygame.K_l):
-        CAMERA["angle_horizontal"] += ANGLE_STEP
-        orientation_changed = True
-    elif event.key in (pygame.K_UP, pygame.K_i):
-        CAMERA["angle_vertical"] = np.clip(
-            CAMERA["angle_vertical"] - ANGLE_STEP,
-            1e-3,
-            np.pi - 1e-3,
-        )
-        orientation_changed = True
-    elif event.key in (pygame.K_DOWN, pygame.K_k):
-        CAMERA["angle_vertical"] = np.clip(
-            CAMERA["angle_vertical"] + ANGLE_STEP,
-            1e-3,
-            np.pi - 1e-3,
-        )
-        orientation_changed = True
-
-    # Déplacement AZERTY : zqsd.
-    # Ici on recalcule la LUT, comme demandé, car la position change.
-    elif event.key == pygame.K_z:
-        move_camera(MOVE_STEP * forward)
-        position_changed = True
-    elif event.key == pygame.K_s:
-        move_camera(-MOVE_STEP * forward)
-        position_changed = True
-    elif event.key == pygame.K_d:
-        move_camera(MOVE_STEP * right)
-        position_changed = True
-    elif event.key == pygame.K_q:
-        move_camera(-MOVE_STEP * right)
-        position_changed = True
-    elif event.key == pygame.K_SPACE:
-        move_camera(MOVE_STEP * up)
-        position_changed = True
-    elif event.key == pygame.K_LSHIFT:
-        move_camera(-MOVE_STEP * up)
+    move_norm = np.linalg.norm(move)
+    if move_norm > 0.0:
+        # Normalisation : z+d ne va pas sqrt(2) fois plus vite que z seul.
+        move_camera(MOVE_SPEED * dt * move / move_norm)
         position_changed = True
 
     return orientation_changed, position_changed, should_quit
@@ -175,7 +164,19 @@ def handle_keydown(event):
 
 def main():
     skybox = func.load_skybox("source/skybox.png")
-    beta_grid, final_states = compute_lut()
+
+    lut_cache = OrbitalLUTCache(
+        M=BLACKHOLE["MASS"],
+        rays_number=RAYS_NUMBER,
+        max_steps=MAX_STEPS,
+        dr=LUT_DR,
+    )
+
+    # Démarrage volontairement un peu plus long : on prend un peu d'avance.
+    # Le reste de la marge +/-20 sera rempli pendant les temps morts.
+    current_r = camera_radius(CAMERA, BLACKHOLE)
+    lut_cache.precompute_margin_around(current_r, margin=STARTUP_PRECOMPUTE_MARGIN)
+    beta_grid, final_states = lut_cache.get_interpolated(current_r)
     frame = render_frame(skybox, beta_grid, final_states)
 
     display = OpenGLImageDisplay(
@@ -186,26 +187,35 @@ def main():
     display.update_image(frame)
 
     running = True
+    last_time = time.perf_counter()
     while running:
+        now = time.perf_counter()
+        dt = min(now - last_time, 0.05)  # évite un gros saut après un calcul bloquant
+        last_time = now
+
         image_dirty = False
         geodesic_dirty = False
+        had_input = False
 
         for event in display.poll_events():
             if event.type == pygame.QUIT:
                 running = False
-            elif event.type == pygame.KEYDOWN:
-                orientation_changed, position_changed, should_quit = handle_keydown(event)
 
-                if should_quit:
-                    running = False
-                if orientation_changed:
-                    image_dirty = True
-                if position_changed:
-                    geodesic_dirty = True
-                    image_dirty = True
+        orientation_changed, position_changed, should_quit = handle_continuous_input(dt)
+        if should_quit:
+            running = False
+
+        if orientation_changed:
+            image_dirty = True
+            had_input = True
+        if position_changed:
+            geodesic_dirty = True
+            image_dirty = True
+            had_input = True
 
         if geodesic_dirty:
-            beta_grid, final_states = compute_lut()
+            current_r = camera_radius(CAMERA, BLACKHOLE)
+            beta_grid, final_states = lut_cache.get_interpolated(current_r)
 
         if image_dirty:
             frame = render_frame(skybox, beta_grid, final_states)
@@ -215,6 +225,15 @@ def main():
         # la texture déjà en VRAM + le FPS.
         display.draw()
         display.tick(240)
+
+        # Temps mort : prépare une seule LUT voisine. Si ça prend ~1s, ce n'est
+        # pas grave : ça arrive seulement quand l'utilisateur ne touche à rien.
+        if not had_input and not image_dirty:
+            current_r = camera_radius(CAMERA, BLACKHOLE)
+            lut_cache.prefetch_one_missing_with_margin(
+                current_r,
+                margin=IDLE_PREFETCH_MARGIN,
+            )
 
     display.close()
 
