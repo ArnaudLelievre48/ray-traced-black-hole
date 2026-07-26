@@ -1,0 +1,8 @@
+numpy
+matplotlib
+cupy
+PyOpenGL
+pygame
+opencv-python
+glfw
+moderngl

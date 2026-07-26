@@ -21,7 +21,7 @@ class Camera:
         self.resolution = resolution
         self.aspect_ratio = self.resolution[0] / self.resolution[1]
         self.camera_virtual_screen_width = 5
-        self.distance_from_virtual_screen = self.camera_virtual_screen_width/(2*np.tan(self.fov/2)) + 0.001
+        self.distance_from_virtual_screen = self.camera_virtual_screen_width/(2*np.tan(self.fov/2))
         print(self.distance_from_virtual_screen)
 
     def move(self, dx, dy, dz, d_angle_vertical, d_angle_horizontal):
@@ -51,7 +51,7 @@ class Camera:
 # --------------------
 
 class BlackHole:
-    def __init__(self, x=0, y=0, z=0, mass=100):
+    def __init__(self, x=0, y=0, z=0, mass=3):
         self.x = x
         self.y = y
         self.z = z
