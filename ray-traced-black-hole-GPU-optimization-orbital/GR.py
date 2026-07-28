@@ -147,14 +147,37 @@ def update_adaptive_step_inplace(h, X, direction_factor, M, h_max):
 
 # beta = 0 => vers le trou noir
 # beta = pi => à l'opposé du trou noir
-def orbital_geodesic(r, M, RAYS_NUMBER=1000, MAX_STEPS=10_000, r_escape=None, h_step=1):
+def circular_timelike_ubeta(r, M):
+    """u^beta=dβ/dτ pour une orbite circulaire massive Schwarzschild.
+
+    Omega=dβ/dt=sqrt(M/r^3), u^t=1/sqrt(1-3M/r), donc
+    u^beta=Omega*u^t. Stable seulement pour r > 6M.
+    """
+    omega = cp.sqrt(M / r**3)
+    ut = 1.0 / cp.sqrt(1.0 - 3.0 * M / r)
+    return omega * ut
+
+
+def orbital_geodesic(r, M, RAYS_NUMBER=1000, MAX_STEPS=10_000, r_escape=None, h_step=1, isParticle=False):
     # le photon respecte ds^2 = -f(r) dt^2 + f(r)^-1 dr^2 + r^2 dbeta^2
     f = 1.0 - 2.0 * M / r
     beta = cp.linspace(0, cp.pi, RAYS_NUMBER, dtype=cp.float64)
 
-    ur = -cp.cos(beta)
-    ubeta = cp.sin(beta) / r
-    ut = cp.sqrt((ur**2 / f + r**2 * ubeta**2) / f)
+    if isParticle:
+        # Pour des particules massives, beta est une coordonnée orbitale, pas
+        # l'angle initial du rayon photonique. On place donc les particules sur
+        # un anneau complet avec une vitesse proche de l'orbite circulaire.
+        beta = cp.linspace(0.0, 2.0 * cp.pi, RAYS_NUMBER, endpoint=False, dtype=cp.float64)
+        ur = cp.zeros_like(beta)
+        ubeta_circ = circular_timelike_ubeta(r, M)
+        ubeta = ubeta_circ * (1.0 + 0.05 * (cp.random.rand(RAYS_NUMBER, dtype=cp.float64) - 0.5))
+        # Normalisation massive : -f ut² + f⁻¹ ur² + r² ubeta² = -1.
+        ut = cp.sqrt((1.0 + ur**2 / f + r**2 * ubeta**2) / f)
+    else:
+        ur = -cp.cos(beta)
+        ubeta = cp.sin(beta) / r
+        # Normalisation photonique : -f ut² + f⁻¹ ur² + r² ubeta² = 0.
+        ut = cp.sqrt((ur**2 / f + r**2 * ubeta**2) / f)
 
     # X[ray_id] = [t, r, beta, ut, ur, ubeta]
     X = cp.stack([
@@ -194,7 +217,7 @@ def orbital_geodesic(r, M, RAYS_NUMBER=1000, MAX_STEPS=10_000, r_escape=None, h_
 
         invalid = ~cp.isfinite(X).all(axis=1)
         captured = r_current <= capture_radius
-        escaped = (r_current >= r_escape) & (ur_current > 0.0)
+        escaped = (r_current >= r_escape) & (ur_current > 0.0) & (not isParticle)
 
         # Nettoyage des états capturés : le dernier pas RK4 peut passer sous
         # l'horizon en coordonnées de Schwarzschild, donc on fige proprement.
@@ -219,6 +242,7 @@ def orbital_geodesic_fast(
     h_step=2,
     check_interval=25,
     h_update_interval=16,
+    isParticle=False
 ):
     """Version performance de orbital_geodesic.
 
@@ -241,9 +265,18 @@ def orbital_geodesic_fast(
     f0 = 1.0 - 2.0 * M / r
     beta0 = cp.linspace(0.0, cp.pi, RAYS_NUMBER, dtype=cp.float64)
 
-    ur0 = -cp.cos(beta0)
-    ubeta0 = cp.sin(beta0) / r
-    ut0 = cp.sqrt((ur0**2 / f0 + r**2 * ubeta0**2) / f0)
+    if isParticle:
+        # Pour des particules massives, beta0 est la position angulaire autour
+        # de l'anneau. On initialise ur=0 et u^beta proche de l'orbite circulaire.
+        beta0 = cp.linspace(0.0, 2.0 * cp.pi, RAYS_NUMBER, endpoint=False, dtype=cp.float64)
+        ur0 = cp.zeros_like(beta0)
+        ubeta_circ = circular_timelike_ubeta(r, M)
+        ubeta0 = ubeta_circ * (1.0 + 0.05 * (cp.random.rand(RAYS_NUMBER, dtype=cp.float64) - 0.5))
+        ut0 = cp.sqrt((1.0 + ur0**2 / f0 + r**2 * ubeta0**2) / f0)
+    else:
+        ur0 = -cp.cos(beta0)
+        ubeta0 = cp.sin(beta0) / r
+        ut0 = cp.sqrt((ur0**2 / f0 + r**2 * ubeta0**2) / f0)
 
     X = cp.empty((RAYS_NUMBER, 6), dtype=cp.float64)
     X[:, 0] = 0.0
@@ -341,7 +374,7 @@ def orbital_geodesic_fast(
 
         invalid = ~cp.isfinite(X).all(axis=1)
         captured = r_current <= capture_radius
-        escaped = (r_current >= r_escape) & (ur_current > 0.0)
+        escaped = (r_current >= r_escape) & (ur_current > 0.0) & (not isParticle)
 
         X[captured, 1] = 2.0 * M
         X[captured, 3:6] = 0.0
@@ -349,3 +382,99 @@ def orbital_geodesic_fast(
         active &= ~(invalid | captured | escaped)
 
     return X
+
+
+def orbital_disk_crossing_samples(
+    r,
+    M,
+    RAYS_NUMBER=1000,
+    MAX_STEPS=10_000,
+    r_inner=None,
+    r_outer=None,
+    max_samples=32,
+    sample_interval=4,
+    h_step=0.8,
+    max_beta_turns=4,
+):
+    """LUT auxiliaire pour le disque d'accrétion.
+
+    On garde quelques valeurs de beta_coord lorsque chaque photon passe dans
+    l'anneau radial du disque :
+
+        r_inner <= r(lambda) <= r_outer
+
+    Le rendu peut ensuite tester si ces beta_coord correspondent à un crossing
+    du plan du disque z=z_BH, sans réintégrer la géodésique par pixel.
+
+    Retour :
+        beta_grid.shape == (RAYS_NUMBER,)
+        beta_samples.shape == (RAYS_NUMBER, max_samples)
+        r_samples.shape == (RAYS_NUMBER, max_samples)
+
+    beta_samples vaut NaN quand aucun sample n'est disponible.
+    """
+    if r_inner is None:
+        r_inner = 6.0 * M
+    if r_outer is None:
+        r_outer = 30.0 * M
+
+    beta_grid = cp.linspace(0.0, cp.pi, RAYS_NUMBER, dtype=cp.float64)
+    f0 = 1.0 - 2.0 * M / r
+
+    ur0 = -cp.cos(beta_grid)
+    ubeta0 = cp.sin(beta_grid) / r
+    ut0 = cp.sqrt((ur0**2 / f0 + r**2 * ubeta0**2) / f0)
+
+    X = cp.empty((RAYS_NUMBER, 6), dtype=cp.float64)
+    X[:, 0] = 0.0
+    X[:, 1] = r
+    X[:, 2] = beta_grid
+    X[:, 3] = ut0
+    X[:, 4] = ur0
+    X[:, 5] = ubeta0
+
+    beta_samples = cp.full((RAYS_NUMBER, max_samples), cp.nan, dtype=cp.float64)
+    r_samples = cp.full((RAYS_NUMBER, max_samples), cp.nan, dtype=cp.float64)
+    sample_counts = cp.zeros(RAYS_NUMBER, dtype=cp.int32)
+
+    active = cp.ones(RAYS_NUMBER, dtype=cp.bool_)
+    capture_radius = 2.05 * M
+    r_escape = r
+    max_beta = max_beta_turns * 2.0 * cp.pi
+
+    for step in range(MAX_STEPS):
+        if step % 25 == 0 and not bool(active.any().get()):
+            break
+
+        if step % sample_interval == 0:
+            r_current = X[:, 1]
+            beta_current = X[:, 2]
+            in_disk_radial_zone = (
+                active
+                & (r_current >= r_inner)
+                & (r_current <= r_outer)
+                & (beta_current >= 0.0)
+                & (beta_current <= max_beta)
+                & (sample_counts < max_samples)
+            )
+            idx = cp.nonzero(in_disk_radial_zone)[0]
+            if idx.size > 0:
+                slots = sample_counts[idx]
+                beta_samples[idx, slots] = beta_current[idx]
+                r_samples[idx, slots] = r_current[idx]
+                sample_counts[idx] += 1
+
+        X[active] = rk4_step(X[active], h_step, M)
+
+        r_current = X[:, 1]
+        ur_current = X[:, 4]
+        beta_current = X[:, 2]
+
+        invalid = ~cp.isfinite(X).all(axis=1)
+        captured = r_current <= capture_radius
+        escaped = (r_current >= r_escape) & (ur_current > 0.0)
+        too_many_turns = beta_current > max_beta
+
+        active &= ~(invalid | captured | escaped | too_many_turns)
+
+    return beta_grid, beta_samples, r_samples

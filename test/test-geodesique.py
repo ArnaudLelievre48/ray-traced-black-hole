@@ -1,31 +1,61 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
-def init_massive_particle(r, phi, u_phi, M):
+
+def circular_uphi(r, M):
+    """u^phi=dphi/dtau pour une orbite circulaire massive de Schwarzschild.
+
+    Omega=dphi/dt=sqrt(M/r^3), u^t=1/sqrt(1-3M/r), donc
+    u^phi=Omega*u^t.
+
+    Stable seulement pour r > 6M ; entre 3M et 6M, circulaire mais instable.
+    """
+    if r <= 3.0 * M:
+        raise ValueError("No timelike circular orbit for r <= 3M")
+    omega = np.sqrt(M / r**3)
+    ut = 1.0 / np.sqrt(1.0 - 3.0 * M / r)
+    return omega * ut
+
+
+def init_massive_particle(r, phi, uphi, M, ur=0.0):
+    """Initialise une particule massive dans le plan orbital.
+
+    X = [t, r, phi, u^t, u^r, u^phi]
+
+    Normalisation massive :
+        -f (u^t)^2 + f^-1 (u^r)^2 + r^2 (u^phi)^2 = -1
+
+    Donc :
+        u^t = sqrt((1 + (u^r)^2/f + r^2 (u^phi)^2) / f)
+    """
     f = 1.0 - 2.0 * M / r
-    u_t = np.sqrt( (1 + r**2 * u_phi**2) / f )
-    X = np.stack([0,r,phi,
-                  u_t, 0, u_phi], dtype=np.float64)
-    return X
+    ut = np.sqrt((1.0 + ur**2 / f + r**2 * uphi**2) / f)
+    return np.array([0.0, r, phi, ut, ur, uphi], dtype=np.float64)
+
+
+def timelike_norm(X, M):
+    """Doit rester proche de -1 pour une particule massive."""
+    r = X[1]
+    f = 1.0 - 2.0 * M / r
+    ut, ur, uphi = X[3], X[4], X[5]
+    return -f * ut**2 + ur**2 / f + r**2 * uphi**2
 
 
 def geodesic_dX(X, M):
     """Membre de droite de la géodésique plane.
 
-    X[ray_id] = [t, r, phi, ut, ur, uphi]
-    dX[ray_id] = [dt, dr, dphi, dut, dur, duphi]
+    X = [t, r, phi, ut, ur, uphi]
+    dX = [dt, dr, dphi, dut, dur, duphi]
     """
     r = X[1]
     ut = X[3]
     ur = X[4]
     uphi = X[5]
 
-    # Schwarzschild est singulier en r=2M.
-    # Si un rayon est déjà capturé / non fini, on met dX=0 pour éviter de
-    # calculer des termes explosifs. orbital_geodesic le désactivera ensuite.
-    capture_radius = 2.05 * M
-
     dX = np.zeros_like(X)
+
+    if (not np.isfinite(X).all()) or r <= 2.05 * M:
+        return dX
 
     f = 1.0 - 2.0 * M / r
 
@@ -35,8 +65,6 @@ def geodesic_dX(X, M):
     dX[2] = uphi
 
     # du^alpha/dlambda = -Gamma^alpha_{mu nu} u^mu u^nu
-    # Version explicite du même calcul que Gamma + einsum, mais sans allouer
-    # Gamma[ray_id,3,3,3] à chaque sous-pas RK4.
     dX[3] = -2.0 * M / (r**2 * f) * ut * ur
     dX[4] = (
         -M * f / r**2 * ut**2
@@ -48,20 +76,8 @@ def geodesic_dX(X, M):
     return dX
 
 
-
-
 def rk4_step(X, M, h=0.1):
-    """Avance X d'un pas RK4.
-
-    h peut être :
-        - scalaire ;
-        - tableau (RAYS_NUMBER,) ;
-        - tableau (RAYS_NUMBER, 1).
-
-    En interne on veut h.shape == (RAYS_NUMBER, 1), pour que chaque rayon ait
-    son propre pas mais que ce pas multiplie les 6 composantes de son état.
-    """
-
+    """Avance X d'un pas RK4."""
     k1 = geodesic_dX(X, M)
     k2 = geodesic_dX(X + 0.5 * h * k1, M)
     k3 = geodesic_dX(X + 0.5 * h * k2, M)
@@ -71,45 +87,51 @@ def rk4_step(X, M, h=0.1):
 
 
 def position_radiale2cartesian(r, phi):
-    x = r*np.cos(phi)
-    y = r*np.sin(phi)
-    return np.array( [x,y] )
+    x = r * np.cos(phi)
+    y = r * np.sin(phi)
+    return np.array([x, y])
+
 
 def black_hole_schwarzchild_radius(M):
     r = 2.0 * M
-    circle = np.zeros( (500, 2) )
+    phi = np.linspace(0, 2*np.pi, 500)
+    return np.stack([r*np.cos(phi), r*np.sin(phi)], axis=1)
 
-    PHI = np.linspace(0,2*np.pi,circle.shape[0])
-    for i in range(circle.shape[0]):
-        phi = PHI[i]
-        x = r*np.cos(phi)
-        y = r*np.sin(phi)
-        circle[i] = np.array([x,y])
-    return circle
 
-r = 50
-phi = -np.pi/2
-uphi = 0.003
-M = 2
+r = 50.0
+phi = -np.pi / 2
+M = 2.0
 
-STEPS = 200_000
+# Pour une particule massive en orbite quasi-circulaire, mieux vaut partir de
+# l'uphi circulaire GR plutôt que d'en choisir un au hasard.
+uphi = circular_uphi(r, M)
+
+STEPS = 50_000
 PARTICLES = 10
+H = 0.2
 
-POSITIONS = np.zeros( (PARTICLES, STEPS, 2) )
+POSITIONS = np.full((PARTICLES, STEPS, 2), np.nan, dtype=np.float64)
 
-plt.plot(np.array(black_hole_schwarzchild_radius(M)[:,0]), np.array(black_hole_schwarzchild_radius(M)[:,1]), color="black")
+horizon = black_hole_schwarzchild_radius(M)
+plt.plot(horizon[:, 0], horizon[:, 1], color="black")
 
 for i in range(POSITIONS.shape[0]):
-    uphi_rand = uphi + (uphi/10)*(np.random.rand()-0.5)
+    # Petit bruit autour de l'orbite circulaire.
+    uphi_rand = uphi * (1.0 + 0.05 * (np.random.rand() - 0.5))
     X = init_massive_particle(r, phi, uphi_rand, M)
-    POSITIONS[i, 0] = position_radiale2cartesian(X[1],X[2])
+    print("initial norm", i, timelike_norm(X, M))
 
-    for j in range(POSITIONS.shape[1]):
-        X = rk4_step(X, M)
-        if X[1] <= 2.05*M:
+    POSITIONS[i, 0] = position_radiale2cartesian(X[1], X[2])
+
+    last_j = 0
+    for j in range(1, POSITIONS.shape[1]):
+        X = rk4_step(X, M, h=H)
+        if X[1] <= 2.05*M or not np.isfinite(X).all():
             break
         POSITIONS[i, j] = position_radiale2cartesian(X[1], X[2])
+        last_j = j
 
-    plt.plot(np.array(POSITIONS[i, :,0]), np.array(POSITIONS[i, :,1]))
+    plt.plot(POSITIONS[i, :last_j+1, 0], POSITIONS[i, :last_j+1, 1])
 
+plt.gca().set_aspect("equal", adjustable="box")
 plt.show()

@@ -4,6 +4,7 @@ import cupy as cp
 import numpy as np
 import pygame
 
+import disk_lut
 import func
 from display import OpenGLImageDisplay
 from lut_cache import OrbitalLUTCache
@@ -19,9 +20,9 @@ BLACKHOLE = {
 CAMERA = {
     "FOV": np.deg2rad(75),
     "x": 0.0,
-    "y": -75.0,
-    "z": 0.0,
-    "angle_vertical": np.pi / 2,
+    "y": -50.0,
+    "z": 5.0,
+    "angle_vertical": np.pi / 2 + np.deg2rad(5),
     "angle_horizontal": np.pi / 2,
     "width": 1280,
     "height": 720,
@@ -31,54 +32,33 @@ CAMERA["distance_from_virtual_screen"] = (
     CAMERA["camera_virtual_screen_width"] / (2.0 * np.tan(CAMERA["FOV"] / 2.0))
 )
 
-RAYS_NUMBER = 100
+RAYS_NUMBER = 5000
 MAX_STEPS = 5_000
 LUT_DR = 1.0
 STARTUP_PRECOMPUTE_MARGIN = 20.0
 IDLE_PREFETCH_MARGIN = 2.0
+ENABLE_DISK_OVERLAY = True
 
 ANGLE_SPEED = np.deg2rad(90.0)  # rad/s
-MOVE_SPEED = 15.0                # unités de coordonnée / s
+MOVE_SPEED = 10.0                # unités de coordonnée / s
 MOUSE_SENSITIVITY = 0.0005        # rad/pixel
 
 
-def camera_position(camera):
-    return np.array([camera["x"], camera["y"], camera["z"]], dtype=np.float64)
+
+def compute_disk_lut_for_current_camera():
+    if not ENABLE_DISK_OVERLAY:
+        return None
+
+    current_r = func.camera_radius(CAMERA, BLACKHOLE)
+    return disk_lut.compute_disk_crossing_lut(
+        current_r,
+        BLACKHOLE["MASS"],
+        rays_number=RAYS_NUMBER,
+        max_steps=MAX_STEPS,
+    )
 
 
-def blackhole_position(blackhole):
-    return np.array([blackhole["x"], blackhole["y"], blackhole["z"]], dtype=np.float64)
-
-
-def camera_radius(camera, blackhole):
-    return np.linalg.norm(camera_position(camera) - blackhole_position(blackhole))
-
-
-def camera_basis(camera):
-    """Retourne forward/right/up en NumPy, même convention que func.camera_pixel_directions."""
-    av = camera["angle_vertical"]
-    ah = camera["angle_horizontal"]
-
-    forward = np.array([
-        np.sin(av) * np.cos(ah),
-        np.sin(av) * np.sin(ah),
-        np.cos(av),
-    ], dtype=np.float64)
-    forward /= np.linalg.norm(forward)
-
-    e_theta = np.array([
-        np.cos(av) * np.cos(ah),
-        np.cos(av) * np.sin(ah),
-        -np.sin(av),
-    ], dtype=np.float64)
-    e_phi = np.array([-np.sin(ah), np.cos(ah), 0.0], dtype=np.float64)
-
-    right = e_phi
-    up = -e_theta
-    return forward, right, up
-
-
-def render_frame(skybox, beta_grid, final_states):
+def render_frame(skybox, beta_grid, final_states, disk_crossing_lut=None):
     """Rend l'image courante depuis CAMERA, sans recalculer la géodésique."""
     t0 = time.perf_counter()
     image_gpu, _, _ = func.render_skybox_from_orbital_lut(
@@ -88,6 +68,17 @@ def render_frame(skybox, beta_grid, final_states):
         final_states,
         skybox,
     )
+    if ENABLE_DISK_OVERLAY and disk_crossing_lut is not None:
+        disk_beta_grid, disk_beta_samples, disk_r_samples = disk_crossing_lut
+        overlay = disk_lut.compute_disk_overlay_from_lut(
+            CAMERA,
+            BLACKHOLE,
+            disk_beta_grid,
+            disk_beta_samples,
+            disk_r_samples,
+        )
+        image_gpu = cp.clip(image_gpu + overlay, 0.0, 1.0)
+
     image_cpu = cp.asnumpy(image_gpu)
     frame_rgb = np.clip(image_cpu * 255.0, 0.0, 255.0).astype(np.uint8)
     print(f"frame rendered in {time.perf_counter() - t0:.3f}s")
@@ -138,7 +129,7 @@ def handle_continuous_input(dt):
         orientation_changed = True
 
     # Déplacement continu AZERTY : zqsd + espace/shift.
-    forward, right, up = camera_basis(CAMERA)
+    forward, right, up = func.camera_basis(CAMERA)
     move = np.zeros(3, dtype=np.float64)
 
     if keys[pygame.K_z]:
@@ -202,10 +193,11 @@ def main():
 
     # Démarrage volontairement un peu plus long : on prend un peu d'avance.
     # Le reste de la marge +/-20 sera rempli pendant les temps morts.
-    current_r = camera_radius(CAMERA, BLACKHOLE)
+    current_r = func.camera_radius(CAMERA, BLACKHOLE)
     lut_cache.precompute_margin_around(current_r, margin=STARTUP_PRECOMPUTE_MARGIN)
     beta_grid, final_states = lut_cache.get_interpolated(current_r)
-    frame = render_frame(skybox, beta_grid, final_states)
+    disk_crossing_lut = compute_disk_lut_for_current_camera()
+    frame = render_frame(skybox, beta_grid, final_states, disk_crossing_lut)
 
     display = OpenGLImageDisplay(
         CAMERA["width"],
@@ -244,11 +236,12 @@ def main():
             had_input = True
 
         if geodesic_dirty:
-            current_r = camera_radius(CAMERA, BLACKHOLE)
+            current_r = func.camera_radius(CAMERA, BLACKHOLE)
             beta_grid, final_states = lut_cache.get_interpolated(current_r)
+            disk_crossing_lut = compute_disk_lut_for_current_camera()
 
         if image_dirty:
-            frame = render_frame(skybox, beta_grid, final_states)
+            frame = render_frame(skybox, beta_grid, final_states, disk_crossing_lut)
             display.update_image(frame)
 
         # Si rien n'a changé, on ne recalcule pas l'image : on redessine juste
@@ -259,7 +252,7 @@ def main():
         # Temps mort : prépare une seule LUT voisine. Si ça prend ~1s, ce n'est
         # pas grave : ça arrive seulement quand l'utilisateur ne touche à rien.
         if not had_input and not image_dirty:
-            current_r = camera_radius(CAMERA, BLACKHOLE)
+            current_r = func.camera_radius(CAMERA, BLACKHOLE)
             lut_cache.prefetch_one_missing_with_margin(
                 current_r,
                 margin=IDLE_PREFETCH_MARGIN,

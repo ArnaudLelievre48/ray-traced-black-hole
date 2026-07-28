@@ -1,4 +1,5 @@
 import cupy as cp
+import numpy as np
 import matplotlib.pyplot as plt
 
 
@@ -233,3 +234,37 @@ def render_skybox_from_orbital_lut(CAMERA, BLACKHOLE, beta_grid, final_states, s
     image[captured] = cp.asarray([0.0, 0.0, 0.0], dtype=cp.float32)
 
     return image, beta_pixel, final_direction
+
+
+def camera_position(camera):
+    return np.array([camera["x"], camera["y"], camera["z"]], dtype=np.float64)
+
+def blackhole_position(blackhole):
+    return np.array([blackhole["x"], blackhole["y"], blackhole["z"]], dtype=np.float64)
+
+def camera_radius(camera, blackhole):
+    return np.linalg.norm(camera_position(camera) - blackhole_position(blackhole))
+
+def camera_basis(camera):
+    """Retourne forward/right/up en NumPy, même convention que func.camera_pixel_directions."""
+    av = camera["angle_vertical"]
+    ah = camera["angle_horizontal"]
+
+    forward = np.array([
+        np.sin(av) * np.cos(ah),
+        np.sin(av) * np.sin(ah),
+        np.cos(av),
+    ], dtype=np.float64)
+    forward /= np.linalg.norm(forward)
+
+    e_theta = np.array([
+        np.cos(av) * np.cos(ah),
+        np.cos(av) * np.sin(ah),
+        -np.sin(av),
+    ], dtype=np.float64)
+    e_phi = np.array([-np.sin(ah), np.cos(ah), 0.0], dtype=np.float64)
+
+    right = e_phi
+    up = -e_theta
+    return forward, right, up
+
