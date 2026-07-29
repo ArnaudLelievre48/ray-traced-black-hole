@@ -3,9 +3,12 @@ import time
 import cupy as cp
 import numpy as np
 import pygame
+import imageio.v3 as iio
+import os
 
 import disk_lut
 import func
+from disk_cache import DiskLUTCache
 from display import OpenGLImageDisplay
 from lut_cache import OrbitalLUTCache
 
@@ -20,9 +23,9 @@ BLACKHOLE = {
 CAMERA = {
     "FOV": np.deg2rad(75),
     "x": 0.0,
-    "y": -50.0,
-    "z": 5.0,
-    "angle_vertical": np.pi / 2 + np.deg2rad(5),
+    "y": -70.0,
+    "z": 8.0,
+    "angle_vertical": np.pi / 2 + np.deg2rad(7),
     "angle_horizontal": np.pi / 2,
     "width": 1280,
     "height": 720,
@@ -32,30 +35,27 @@ CAMERA["distance_from_virtual_screen"] = (
     CAMERA["camera_virtual_screen_width"] / (2.0 * np.tan(CAMERA["FOV"] / 2.0))
 )
 
-RAYS_NUMBER = 5000
-MAX_STEPS = 5_000
+RAYS_NUMBER = 1000
+MAX_STEPS = 250_000
 LUT_DR = 1.0
-STARTUP_PRECOMPUTE_MARGIN = 20.0
-IDLE_PREFETCH_MARGIN = 2.0
-ENABLE_DISK_OVERLAY = True
+STARTUP_PRECOMPUTE_MARGIN = 5.0
+IDLE_PREFETCH_MARGIN = 3.0
+ENABLE_DISK_OVERLAY = False
 
 ANGLE_SPEED = np.deg2rad(90.0)  # rad/s
 MOVE_SPEED = 10.0                # unités de coordonnée / s
 MOUSE_SENSITIVITY = 0.0005        # rad/pixel
 
+OUT_DIR = "video_frames"
+os.makedirs(OUT_DIR, exist_ok=True)
 
 
-def compute_disk_lut_for_current_camera():
+def compute_disk_lut_for_current_camera(disk_cache):
     if not ENABLE_DISK_OVERLAY:
         return None
 
     current_r = func.camera_radius(CAMERA, BLACKHOLE)
-    return disk_lut.compute_disk_crossing_lut(
-        current_r,
-        BLACKHOLE["MASS"],
-        rays_number=RAYS_NUMBER,
-        max_steps=MAX_STEPS,
-    )
+    return disk_cache.get(current_r)
 
 
 def render_frame(skybox, beta_grid, final_states, disk_crossing_lut=None):
@@ -105,6 +105,7 @@ def handle_continuous_input(dt):
     orientation_changed = False
     position_changed = False
     should_quit = keys[pygame.K_ESCAPE]
+    toggle_disk = keys[pygame.K_m]
 
     # Rotation continue.
     d_angle_h = 0.0
@@ -151,7 +152,7 @@ def handle_continuous_input(dt):
         move_camera(MOVE_SPEED * dt * move / move_norm)
         position_changed = True
 
-    return orientation_changed, position_changed, should_quit
+    return orientation_changed, position_changed, should_quit, toggle_disk
 
 
 def capture_mouse():
@@ -182,9 +183,17 @@ def handle_mouse_look():
 
 
 def main():
+    global ENABLE_DISK_OVERLAY
+
     skybox = func.load_skybox("source/skybox.png")
 
     lut_cache = OrbitalLUTCache(
+        M=BLACKHOLE["MASS"],
+        rays_number=RAYS_NUMBER,
+        max_steps=MAX_STEPS,
+        dr=LUT_DR,
+    )
+    disk_cache = DiskLUTCache(
         M=BLACKHOLE["MASS"],
         rays_number=RAYS_NUMBER,
         max_steps=MAX_STEPS,
@@ -196,7 +205,7 @@ def main():
     current_r = func.camera_radius(CAMERA, BLACKHOLE)
     lut_cache.precompute_margin_around(current_r, margin=STARTUP_PRECOMPUTE_MARGIN)
     beta_grid, final_states = lut_cache.get_interpolated(current_r)
-    disk_crossing_lut = compute_disk_lut_for_current_camera()
+    disk_crossing_lut = compute_disk_lut_for_current_camera(disk_cache)
     frame = render_frame(skybox, beta_grid, final_states, disk_crossing_lut)
 
     display = OpenGLImageDisplay(
@@ -208,6 +217,7 @@ def main():
     capture_mouse()
 
     running = True
+    previous_toggle_disk = False
     last_time = time.perf_counter()
     while running:
         now = time.perf_counter()
@@ -222,10 +232,18 @@ def main():
             if event.type == pygame.QUIT:
                 running = False
 
-        orientation_changed, position_changed, should_quit = handle_continuous_input(dt)
+        orientation_changed, position_changed, should_quit, toggle_disk = handle_continuous_input(dt)
         mouse_changed = handle_mouse_look()
         if should_quit:
             running = False
+        if toggle_disk and not previous_toggle_disk:
+            ENABLE_DISK_OVERLAY = not ENABLE_DISK_OVERLAY
+            print(f"disk overlay: {'on' if ENABLE_DISK_OVERLAY else 'off'}")
+            if ENABLE_DISK_OVERLAY and disk_crossing_lut is None:
+                disk_crossing_lut = compute_disk_lut_for_current_camera(disk_cache)
+            image_dirty = True
+            had_input = True
+        previous_toggle_disk = toggle_disk
 
         if orientation_changed or mouse_changed:
             image_dirty = True
@@ -238,7 +256,7 @@ def main():
         if geodesic_dirty:
             current_r = func.camera_radius(CAMERA, BLACKHOLE)
             beta_grid, final_states = lut_cache.get_interpolated(current_r)
-            disk_crossing_lut = compute_disk_lut_for_current_camera()
+            disk_crossing_lut = compute_disk_lut_for_current_camera(disk_cache)
 
         if image_dirty:
             frame = render_frame(skybox, beta_grid, final_states, disk_crossing_lut)

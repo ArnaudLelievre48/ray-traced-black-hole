@@ -10,7 +10,7 @@ import func
 DISK_COLOR = cp.asarray([1.0, 0.42, 0.05], dtype=cp.float32)
 
 
-def compute_radiuses_factors(M, factor=1.8):
+def compute_radiuses_factors(M, factor=1.7):
     L = factor*2*np.sqrt(3)*M
     r_min_factor = ( (L**2) / (2.0*M) ) * (1 - np.sqrt(1 - ( (12 * M**2) / (L**2) ) ) ) / M
     r_max_factor = ( (L**2) / (2.0*M) ) * (1 + np.sqrt(1 - ( (12 * M**2) / (L**2) ) ) ) / M
@@ -21,14 +21,13 @@ def compute_disk_crossing_lut(
     M,
     rays_number,
     max_steps,
-    r_inner_factor=6.0,
-    r_outer_factor=20.0,
-    max_samples=128,
+    max_samples=256,
     sample_interval=0.25,
     h_step=0.5,
     max_beta_turns=8,
 ):
     r_inner_factor, r_outer_factor = compute_radiuses_factors(M)
+    print(r_inner_factor, r_outer_factor)
     """Calcule la LUT disque : beta_initial -> beta_coord dans l'anneau radial.
 
     Cette LUT est indépendante de l'orientation de caméra : elle dépend seulement
@@ -118,56 +117,63 @@ def blackbody_rgb_from_temperature(T):
 def disk_blackbody_emission_from_radius(r, M, r_inner, r_outer):
     """Couleur/intensité du disque ne dépendant que de r.
 
-    Modèle jouet mais un peu cohérent :
-        - énergie locale = énergie de liaison d'une orbite circulaire,
-          binding(r)=1-e_circ(r) ;
-        - E ~ T en unités naturelles, puis remappage vers des Kelvin visuels ;
-        - intensité ~ T^4, renormalisée pour l'image.
+    Modèle disque mince newtonien/Schwarzschild simplifié :
+        F(r) ∝ r^-3 * (1 - sqrt(r_in/r))
 
-    Pour éviter un disque bleu/blanc partout, on fait un remapping artistique
-    de T vers environ 1800K..12000K.
+    Avantages pour notre rendu :
+        - F=0 au bord interne : pas de matière lumineuse collée à l'ombre ;
+        - maximum un peu après r_in ;
+        - décroissance externe naturelle + extinction douce à r_out ;
+        - T ∝ F^(1/4), puis RGB corps noir.
+
+    Ce n'est pas Novikov-Thorne complet, mais c'est beaucoup plus cohérent que
+    "tout rayon traversé brille" ou que binding(r) seul.
     """
-    # En dessous de l'ISCO, on garde la température au niveau ISCO au lieu de
-    # laisser la formule d'orbite circulaire instable donner une couleur froide.
-    r_hot = cp.maximum(cp.asarray(r_inner, dtype=cp.float64), 6.0 * M)
-    r_temp = cp.maximum(r, r_hot)
-    e = circular_orbit_specific_energy(r_temp, M)
-    binding = cp.maximum(1.0 - e, 0.0)
+    r_in = cp.maximum(cp.asarray(r_inner, dtype=cp.float64), 6.0 * M)
+    r_out = cp.asarray(r_outer, dtype=cp.float64)
+    r_safe = cp.maximum(r, 1e-6)
 
-    # Pour la température, on prend 6M comme rayon chaud de référence : c'est
-    # l'ISCO Schwarzschild stable. Si le disque géométrique descend sous 6M
-    # pour des raisons visuelles, on évite que la normalisation soit dominée
-    # par une orbite circulaire instable très proche de 3M.
-    r_hot = cp.maximum(cp.asarray(r_inner, dtype=cp.float64), 6.0 * M)
-    e_inner = circular_orbit_specific_energy(r_hot, M)
-    e_outer = circular_orbit_specific_energy(cp.asarray(r_outer, dtype=cp.float64), M)
-    binding_inner = cp.maximum(1.0 - e_inner, 1e-8)
-    binding_outer = cp.maximum(1.0 - e_outer, 0.0)
+    in_disk = (r_safe >= r_in) & (r_safe <= r_out)
 
-    T_norm = cp.clip((binding - binding_outer) / (binding_inner - binding_outer + 1e-8), 0.0, 1.0)
+    # Flux disque mince : zéro sous r_in, zéro exactement à r_in, puis pic vers
+    # r = (49/36) r_in avant de décroître comme r^-3.
+    flux = cp.where(
+        in_disk,
+        r_safe**-3 * cp.maximum(1.0 - cp.sqrt(r_in / r_safe), 0.0),
+        0.0,
+    )
 
-    # Température visuelle plus chaude/rouge que la version précédente.
-    # Un vrai disque très chaud devient blanc/bleu ; pour obtenir un rendu plus
-    # rouge tout en restant cohérent, on applique :
-    #   1) une plage Kelvin plus basse ;
-    #   2) un redshift gravitationnel simplifié g=sqrt(1-2M/r).
-    T_COLD = 1400.0
+    # r_outer est un bord artificiel de notre disque fini. Le flux disque mince
+    # infini ne s'y annule pas tout seul, donc on ajoute une extinction douce
+    # sur le dernier quart radial du disque pour éviter un cut brutal lumineux.
+    outer_fade_width = 0.25 * cp.maximum(r_out - r_in, 1e-6)
+    x_outer = cp.clip((r_out - r_safe) / outer_fade_width, 0.0, 1.0)
+    outer_taper = x_outer * x_outer * (3.0 - 2.0 * x_outer)  # smoothstep
+    flux *= outer_taper
+
+    r_peak = (49.0 / 36.0) * r_in
+    flux_peak = r_peak**-3 * cp.maximum(1.0 - cp.sqrt(r_in / r_peak), 1e-12)
+    # Le pic analytique est avant le taper externe pour nos tailles usuelles ;
+    # il reste une bonne normalisation visuelle.
+    F_norm = cp.clip(flux / (flux_peak + 1e-30), 0.0, 1.0)
+
+    # Corps noir : F ∝ T^4, donc T ∝ F^(1/4). On remappe vers des Kelvin
+    # visuels et on applique un redshift gravitationnel observé très simple.
+    T_norm = cp.power(F_norm, 0.25)
+    T_COLD = 1300.0
     T_HOT = 7200.0
-    g_redshift = cp.sqrt(cp.clip(1.0 - 2.0 * M / r_temp, 0.05, 1.0))
+    g_redshift = cp.sqrt(cp.clip(1.0 - 2.0 * M / r_safe, 0.05, 1.0))
     T_visual = (T_COLD + (T_HOT - T_COLD) * T_norm) * g_redshift
 
-    # Wien en unités SI visuelles : lambda_max = 2.897e-3 / T.
-    # On ne l'utilise pas directement pour le RGB, mais T_visual suit cette idée.
     color = blackbody_rgb_from_temperature(T_visual)
 
-    # Color grading léger : garde l'esprit corps noir, mais réchauffe l'image.
+    # Warm tint léger : garde l'esprit corps noir, mais évite un disque trop bleu.
     WARM_TINT = cp.asarray([1.10, 0.92, 0.72], dtype=cp.float32)
     color = cp.clip(color * WARM_TINT, 0.0, 1.0)
 
-    # Intensité corps noir ~ sigma T^4 serait très contrastée et rendrait
-    # presque invisible l'extérieur du disque. Pour le rendu, on garde l'idée
-    # T plus chaud => plus brillant, avec une compression dynamique.
-    intensity = 1.50 * T_norm**2
+    # Intensité surfacique : proportionnelle au flux normalisé, pas affine.
+    # Donc sous r_in, au bord interne et au bord externe : 0.
+    intensity = 1.65 * F_norm
     return color, intensity.astype(cp.float32)
 
 
@@ -181,7 +187,7 @@ def compute_disk_overlay_from_lut(
     max_beta_turns=8,
     emission=1.25,
     b_min_factor=0.0,
-    b_max_factor=30.0,
+    b_max_factor=40.0,
 ):
     """Overlay disque depuis la LUT de crossing, sans réintégrer de géodésique.
 
