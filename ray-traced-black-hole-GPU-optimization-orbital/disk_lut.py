@@ -27,7 +27,6 @@ def compute_disk_crossing_lut(
     max_beta_turns=8,
 ):
     r_inner_factor, r_outer_factor = compute_radiuses_factors(M)
-    print(r_inner_factor, r_outer_factor)
     """Calcule la LUT disque : beta_initial -> beta_coord dans l'anneau radial.
 
     Cette LUT est indépendante de l'orientation de caméra : elle dépend seulement
