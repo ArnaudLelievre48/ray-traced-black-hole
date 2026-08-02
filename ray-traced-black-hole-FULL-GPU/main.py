@@ -21,14 +21,14 @@ BLACKHOLE = {
 }
 
 CAMERA = {
-    "FOV": np.deg2rad(75),
+    "FOV": np.deg2rad(80),
     "x": 0.0,
     "y": -70.0,
     "z": 8.0,
     "angle_vertical": np.pi / 2 + np.deg2rad(7),
     "angle_horizontal": np.pi / 2,
-    "width": 1280,
-    "height": 720,
+    "width": 1920,
+    "height": 1080,
     "camera_virtual_screen_width": 1.0,
 }
 CAMERA["distance_from_virtual_screen"] = (
