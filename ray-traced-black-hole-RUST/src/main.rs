@@ -37,7 +37,6 @@ struct BlackHole {
 // --- GENERAL FUNCS ---
 // ---------------------
 
-
 fn deg2rad(angle: f64) -> f64 {
     angle * PI / 180.0
 }
@@ -61,7 +60,6 @@ fn direction_to_angles(direction: [f64; 3]) -> (f64, f64) {
 // ---------------------
 // --- DISPLAY FUNC  ---
 // ---------------------
-
 
 fn initial_direction(camera: &Camera, pixel_x: u32, pixel_y: u32) -> [f64; 3] {
     let theta = camera.angle_vertical;
@@ -101,7 +99,6 @@ fn skybox_pixel(skybox: &image::RgbImage, theta: f64, phi: f64) -> image::Rgb<u8
 
     *skybox.get_pixel(x.min(width - 1), y.min(height - 1))
 }
-
 
 
 
@@ -255,8 +252,8 @@ fn render_image( camera: &Camera, black_hole: &BlackHole, simulation: &Simulatio
 fn main() {
     println!("\n---------- RAY-TRACED-BLACK-HOLE ----------\n");
 
-    let simulation = Simulation { max_steps: 100_000, h: 0.05 };
-    let camera = Camera { fov: deg2rad(75.0), x: 0.0, y: -50.0, z: 10.0, angle_vertical: PI / 2.0 + deg2rad(10.0), angle_horizontal: PI / 2.0, width: 200, height: 150 };
+    let simulation = Simulation { max_steps: 500_000, h: 0.02 };
+    let camera = Camera { fov: deg2rad(75.0), x: 0.0, y: -50.0, z: 10.0, angle_vertical: PI / 2.0 + deg2rad(10.0), angle_horizontal: PI / 2.0, width: 1280, height: 720 };
     let black_hole = BlackHole { mass: 1.0, x: 0.0, y: 0.0, z: 0.0 };
 
     let skybox_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/skybox.png");
