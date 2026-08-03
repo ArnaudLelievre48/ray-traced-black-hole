@@ -44,14 +44,15 @@ fn deg2rad(angle: f64) -> f64 {
 fn normalize(vector: [f64; 3]) -> [f64; 3] {
     let norm = (vector[0] * vector[0] + vector[1] * vector[1] + vector[2] * vector[2]).sqrt();
 
-    [vector[0] / norm, vector[1] / norm, vector[2] / norm]
+    return [vector[0] / norm, vector[1] / norm, vector[2] / norm];
 }
 
 fn direction_to_angles(direction: [f64; 3]) -> (f64, f64) {
     let direction = normalize(direction);
     let theta = direction[2].clamp(-1.0, 1.0).acos();
     let phi = direction[1].atan2(direction[0]).rem_euclid(2.0 * PI);
-    (theta, phi)
+
+    return (theta, phi);
 }
 
 
@@ -77,7 +78,7 @@ fn initial_direction(camera: &Camera, pixel_x: u32, pixel_y: u32) -> [f64; 3] {
         theta.sin(),
     ];
 
-    // Coordonnees du centre du pixel sur un ecran compris entre -1 et 1.
+    // Coordonnees du centre du pixel (d'où le +0.5) sur un ecran compris entre -1 et 1.
     let screen_x = 2.0 * (pixel_x as f64 + 0.5) / camera.width as f64 - 1.0;
     let screen_y = 1.0 - 2.0 * (pixel_y as f64 + 0.5) / camera.height as f64;
     let tan_half_fov = (camera.fov / 2.0).tan();
@@ -85,11 +86,11 @@ fn initial_direction(camera: &Camera, pixel_x: u32, pixel_y: u32) -> [f64; 3] {
     let x = screen_x * tan_half_fov;
     let y = screen_y * tan_half_fov / aspect_ratio;
 
-    normalize([
+    return normalize([
         forward[0] + x * right[0] + y * up[0],
         forward[1] + x * right[1] + y * up[1],
         forward[2] + x * right[2] + y * up[2],
-    ])
+    ]);
 }
 
 fn skybox_pixel(skybox: &image::RgbImage, theta: f64, phi: f64) -> image::Rgb<u8> {
@@ -97,7 +98,8 @@ fn skybox_pixel(skybox: &image::RgbImage, theta: f64, phi: f64) -> image::Rgb<u8
     let x = (phi.rem_euclid(2.0 * PI) / (2.0 * PI) * width as f64) as u32;
     let y = (theta.clamp(0.0, PI) / PI * height as f64) as u32;
 
-    *skybox.get_pixel(x.min(width - 1), y.min(height - 1))
+    // * fait une copie du pixel retourné par skybox.get_pixel()
+    return *skybox.get_pixel(x.min(width - 1), y.min(height - 1));
 }
 
 
@@ -112,11 +114,12 @@ fn initialize_ray(camera: &Camera, black_hole: &BlackHole, direction: [f64; 3]) 
     let radial_direction = normalize([camera.x - black_hole.x, camera.y - black_hole.y, camera.z - black_hole.z]);
     let radius = ( (camera.x - black_hole.x).powi(2) + (camera.y - black_hole.y).powi(2) + (camera.z - black_hole.z).powi(2) ).sqrt();
 
-    let cos_alpha = (direction[0] * radial_direction[0] + direction[1] * radial_direction[1] + direction[2] * radial_direction[2]).clamp(-1.0, 1.0); // produit scalaire, clamp pour éviter les erreurs de précision float
+    // cos_alpha obtenu par le produit scalaire entre direction et radial_direction
+    let cos_alpha = (direction[0] * radial_direction[0] + direction[1] * radial_direction[1] + direction[2] * radial_direction[2]).clamp(-1.0, 1.0); // clamp pour éviter les erreurs de précision float
     let sin_alpha = (1.0 - cos_alpha * cos_alpha).sqrt();
 
     // Direction tangentielle du plan dans lequel se deplace le photon.
-    let tangent_direction = if sin_alpha > 1e-12 {
+    let tangent_direction = if sin_alpha > 0.0 {
         [ (direction[0] - cos_alpha * radial_direction[0]) / sin_alpha, (direction[1] - cos_alpha * radial_direction[1]) / sin_alpha, (direction[2] - cos_alpha * radial_direction[2]) / sin_alpha]
     } else {
         // Le choix du plan n'a pas d'effet pour un rayon parfaitement radial.
@@ -129,6 +132,7 @@ fn initialize_ray(camera: &Camera, black_hole: &BlackHole, direction: [f64; 3]) 
 
     let f = 1.0 - 2.0 * black_hole.mass / radius;
 
+    // obtenu par condition sur la métrique
     let state = vec![
         0.0, radius, 0.0,
         1.0 / f.sqrt(), f.sqrt() * cos_alpha, sin_alpha / radius,
@@ -156,18 +160,21 @@ fn geodesic_dx(state: &[f64], black_hole: &BlackHole) -> Vec<f64> {
 
 fn rk4(state: &[f64], h: f64, black_hole: &BlackHole) -> Vec<f64> {
     let k1 = geodesic_dx(state, black_hole);
+
     let state2: Vec<f64> = state
         .iter()
         .zip(&k1)
         .map(|(value, slope)| value + 0.5 * h * slope)
         .collect();
     let k2 = geodesic_dx(&state2, black_hole);
+
     let state3: Vec<f64> = state
         .iter()
         .zip(&k2)
         .map(|(value, slope)| value + 0.5 * h * slope)
         .collect();
     let k3 = geodesic_dx(&state3, black_hole);
+
     let state4: Vec<f64> = state
         .iter()
         .zip(&k3)
@@ -175,9 +182,9 @@ fn rk4(state: &[f64], h: f64, black_hole: &BlackHole) -> Vec<f64> {
         .collect();
     let k4 = geodesic_dx(&state4, black_hole);
 
-    (0..state.len())
+    return (0..state.len())
         .map(|i| state[i] + h / 6.0 * (k1[i] + 2.0 * k2[i] + 2.0 * k3[i] + k4[i]))
-        .collect()
+        .collect();
 }
 
 fn final_direction( state: &[f64], initial_radial: [f64; 3], initial_tangent: [f64; 3], black_hole: &BlackHole ) -> [f64; 3] {
@@ -189,7 +196,7 @@ fn final_direction( state: &[f64], initial_radial: [f64; 3], initial_tangent: [f
     let radial_speed = state[4] / f.sqrt();
     let tangent_speed = state[1] * state[5];
 
-    normalize([radial_speed * radial[0] + tangent_speed * tangent[0], radial_speed * radial[1] + tangent_speed * tangent[1], radial_speed * radial[2] + tangent_speed * tangent[2]])
+    return normalize([radial_speed * radial[0] + tangent_speed * tangent[0], radial_speed * radial[1] + tangent_speed * tangent[1], radial_speed * radial[2] + tangent_speed * tangent[2]]);
 }
 
 // None signifie que le photon a franchi l'horizon et doit etre affiche en noir.
@@ -202,7 +209,7 @@ fn trace_ray( camera: &Camera, black_hole: &BlackHole, simulation: &Simulation, 
     for _step in 0..simulation.max_steps {
         state = rk4(&state, simulation.h, black_hole);
 
-        if !state[1].is_finite() || state[1] <= schwarzschild_radius * 1.001 {
+        if !state[1].is_finite() || state[1] <= schwarzschild_radius * 1.01 {
             return None;
         }
 
@@ -212,12 +219,13 @@ fn trace_ray( camera: &Camera, black_hole: &BlackHole, simulation: &Simulation, 
         }
     }
 
-    Some(final_direction(
+    // Some permet de contenir soit None soit la valeur
+    return Some(final_direction(
         &state,
         initial_radial,
         initial_tangent,
         black_hole,
-    ))
+    ));
 }
 
 fn render_image( camera: &Camera, black_hole: &BlackHole, simulation: &Simulation, skybox: &image::RgbImage ) -> image::RgbImage {
@@ -233,6 +241,7 @@ fn render_image( camera: &Camera, black_hole: &BlackHole, simulation: &Simulatio
                     let (theta, phi) = direction_to_angles(direction);
                     skybox_pixel(skybox, theta, phi)
                 }
+                // Si None, alors on est dans le rayon de Schwarzchild, donc on retourne noir
                 None => image::Rgb([0, 0, 0]),
             };
             render.put_pixel(x, y, pixel);
@@ -253,7 +262,7 @@ fn main() {
     println!("\n---------- RAY-TRACED-BLACK-HOLE ----------\n");
 
     let simulation = Simulation { max_steps: 500_000, h: 0.02 };
-    let camera = Camera { fov: deg2rad(75.0), x: 0.0, y: -50.0, z: 10.0, angle_vertical: PI / 2.0 + deg2rad(10.0), angle_horizontal: PI / 2.0, width: 1280, height: 720 };
+    let camera = Camera { fov: deg2rad(75.0), x: 0.0, y: -50.0, z: 10.0, angle_vertical: PI / 2.0 + deg2rad(10.0), angle_horizontal: PI / 2.0, width: 400, height: 300 };
     let black_hole = BlackHole { mass: 1.0, x: 0.0, y: 0.0, z: 0.0 };
 
     let skybox_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/skybox.png");
